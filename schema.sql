@@ -40,6 +40,14 @@ create policy "members all lists" on lists for all to authenticated using (is_me
 drop policy if exists "members all items" on items;
 create policy "members all items" on items for all to authenticated using (is_member()) with check (is_member());
 
+-- Let signed-in users reach these tables (automatic API grants are off in this project).
+-- The policies above still limit access to the allowed emails only.
+grant usage on schema public to authenticated;
+grant select on allowed_emails to authenticated;
+grant select, insert, update, delete on lists, items to authenticated;
+grant execute on function is_member() to authenticated;
+revoke execute on function is_member() from anon, public;
+
 -- Live sync
 alter table items replica identity full;
 alter table lists replica identity full;
