@@ -1,5 +1,5 @@
 // Keeps the app shell available offline. Data always comes live from Supabase.
-const CACHE = 'our-lists-v4';
+const CACHE = 'our-lists-v5';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'vendor/supabase.js', 'vendor/Sortable.min.js', 'manifest.webmanifest', 'icons/icon-192.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)));
@@ -14,7 +14,8 @@ self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
   // Network first, fall back to cache when offline
   e.respondWith(
-    fetch(e.request).then(res => {
+    // 'no-cache' asks the server whether there's a newer copy, so updates arrive right away.
+    fetch(e.request, { cache: 'no-cache' }).then(res => {
       const copy = res.clone();
       caches.open(CACHE).then(c => c.put(e.request, copy));
       return res;

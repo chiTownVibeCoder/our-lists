@@ -425,4 +425,15 @@ async function handleSession(session) {
 // Run outside the auth callback (calling Supabase inside it can stall).
 sb.auth.onAuthStateChange((_event, session) => { setTimeout(() => handleSession(session), 0); });
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+// Keep the Home Screen app up to date: check for a new version whenever it's opened,
+// and reload once when a new version takes over.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update(); });
+  });
+  let reloaded = false;
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !reloaded) { reloaded = true; location.reload(); }
+  });
+}
