@@ -80,6 +80,7 @@ function restore(table, rows) {
 }
 
 function deleteForever(table, rows) {
+  clearTimeout(toastTimer); state.toast = null;
   const ids = new Set(rows.map(r => r.id));
   if (table === 'lists') {
     state.allLists = state.allLists.filter(l => !ids.has(l.id));
@@ -120,7 +121,7 @@ function binScreen() {
     h('div', { class: 'grow' }, h('span', { class: 'text' }, title), h('span', { class: 'sub' }, sub)),
     h('button', { onclick: () => restore(table, [row]) }, 'Restore'),
     h('button', { class: 'del', 'aria-label': 'Delete forever', onclick: () => {
-      if (confirm(`Delete "${title}" for good? This can't be undone.`)) deleteForever(table, [row]);
+      askConfirm(`Delete "${title}" for good? This can't be undone.`, 'Delete for good', () => deleteForever(table, [row]));
     } }, '×'));
 
   return h('div', {},
@@ -142,9 +143,10 @@ function binScreen() {
       : h('p', { class: 'muted' }, 'No deleted items.'),
     (lists.length || items.length) ? h('div', { class: 'footer' }, h('span'),
       h('button', { style: 'color: var(--danger)', onclick: () => {
-        if (!confirm("Empty the recycle bin? Everything in it will be deleted for good. This can't be undone.")) return;
-        deleteForever('items', items);
-        deleteForever('lists', lists);
+        askConfirm("Empty the recycle bin? Everything in it will be deleted for good. This can't be undone.", 'Empty bin', () => {
+          deleteForever('items', items);
+          deleteForever('lists', lists);
+        });
       } }, 'Empty recycle bin')) : null);
 }
 
@@ -343,6 +345,31 @@ function sortable(container, open) {
   return container;
 }
 
+// Rename right on the page (some browsers block pop-up boxes).
+function renameForm(list) {
+  const input = h('input', { value: list.name, maxlength: 60, 'aria-label': 'List name' });
+  const done = () => { state.renaming = false; render(); };
+  return h('form', { class: 'addbar rename', onsubmit: e => {
+    e.preventDefault();
+    const n = input.value.trim();
+    if (n && n !== list.name) { list.name = n; act(sb.from('lists').update({ name: n }).eq('id', list.id)); }
+    done();
+  } }, input,
+    h('button', { class: 'btn', type: 'submit' }, 'Save'),
+    h('button', { type: 'button', onclick: done }, 'Cancel'));
+}
+
+// An in-app "Are you sure?" box, used instead of the browser's pop-up.
+function askConfirm(text, okLabel, onOk) {
+  const close = () => box.remove();
+  const box = h('div', { class: 'overlay', onclick: e => { if (e.target === box) close(); } },
+    h('div', { class: 'dialog stack' },
+      h('p', {}, text),
+      h('button', { class: 'btn danger', onclick: () => { close(); onOk(); } }, okLabel),
+      h('button', { class: 'btn secondary', onclick: close }, 'Cancel')));
+  document.body.append(box);
+}
+
 function listScreen(list) {
   const items = state.items.filter(i => i.list_id === list.id);
   const open = items.filter(i => !i.done);
@@ -362,12 +389,9 @@ function listScreen(list) {
 
   return h('div', {},
     h('div', { class: 'topbar' },
-      h('button', { onclick: () => { state.openListId = null; render(); } }, '‹ Lists'),
-      h('button', { onclick: () => {
-        const n = prompt('Rename list', list.name);
-        if (n && n.trim()) act(sb.from('lists').update({ name: n.trim() }).eq('id', list.id));
-      } }, 'Rename')),
-    h('h1', {}, list.name),
+      h('button', { onclick: () => { state.openListId = null; state.renaming = false; render(); } }, '‹ Lists'),
+      h('button', { onclick: () => { state.renaming = true; render(); app.querySelector('.rename input')?.select(); } }, 'Rename')),
+    state.renaming ? renameForm(list) : h('h1', {}, list.name),
     state.notice && h('div', { class: 'msg err' }, state.notice),
     addForm,
     open.length ? sortable(h('div', { class: 'card' }, open.map(i => itemRow(i, list))), open)
