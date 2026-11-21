@@ -229,6 +229,13 @@ function dueChip(item) {
     item.due_date = v; render();
     act(sb.from('items').update({ due_date: v }).eq('id', item.id));
   });
+  // Phones open their date wheel on tap. Computers need to be asked to show the calendar.
+  picker.addEventListener('click', e => {
+    if (matchMedia('(pointer: fine)').matches && picker.showPicker) {
+      e.preventDefault();
+      try { picker.showPicker(); } catch { picker.focus(); }
+    }
+  });
   return h('label', { class: 'due ' + (info && !item.done ? info.cls : '') },
     info ? info.text : '+ Due date', picker);
 }
