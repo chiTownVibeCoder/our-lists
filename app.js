@@ -7,7 +7,9 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 });
 
 const app = document.getElementById('app');
-const state = { user: null, lists: [], items: [], openListId: null, notice: null };
+// allLists/allItems include things in the recycle bin; lists/items are only the live ones.
+const state = { user: null, allLists: [], allItems: [], lists: [], items: [], openListId: null, view: 'home', notice: null, toast: null };
+const BIN_DAYS = 30;
 
 // ---------- tiny DOM helper ----------
 function h(tag, props = {}, ...kids) {
@@ -28,12 +30,122 @@ async function loadAll() {
     sb.from('items').select('*').order('created_at'),
   ]);
   if (l.error || i.error) { state.notice = (l.error || i.error).message; }
-  state.lists = l.data || [];
-  // Drag order first (position), then oldest first.
-  state.items = (i.data || []).sort((a, b) =>
-    (a.position ?? Infinity) - (b.position ?? Infinity) || a.created_at.localeCompare(b.created_at));
+  state.allLists = l.data || [];
+  state.allItems = i.data || [];
+  derive();
   if (state.openListId && !state.lists.some(x => x.id === state.openListId)) state.openListId = null;
   render();
+  purgeOldBin();
+}
+
+// Work out what's live and what's in the recycle bin.
+function derive() {
+  // Drag order first (position), then oldest first.
+  state.allItems.sort((a, b) =>
+    (a.position ?? Infinity) - (b.position ?? Infinity) || (a.created_at || '').localeCompare(b.created_at || ''));
+  state.lists = state.allLists.filter(l => !l.deleted_at);
+  const live = new Set(state.lists.map(l => l.id));
+  state.items = state.allItems.filter(i => !i.deleted_at && live.has(i.list_id));
+}
+
+// Anything in the bin for more than 30 days is deleted for good.
+let purged = false;
+async function purgeOldBin() {
+  if (purged) return; purged = true;
+  const cutoff = new Date(Date.now() - BIN_DAYS * 864e5).toISOString();
+  const old = [...state.allLists, ...state.allItems].some(x => x.deleted_at && x.deleted_at < cutoff);
+  if (!old) return;
+  await sb.from('items').delete().lt('deleted_at', cutoff);
+  await sb.from('lists').delete().lt('deleted_at', cutoff);
+  scheduleReload();
+}
+
+// ---------- recycle bin + undo ----------
+function moveToBin(table, rows, message) {
+  if (!rows.length) return;
+  const when = new Date().toISOString();
+  const ids = rows.map(r => r.id);
+  rows.forEach(r => { r.deleted_at = when; });
+  derive();
+  showToast(message, () => restore(table, rows));
+  render();
+  act(sb.from(table).update({ deleted_at: when }).in('id', ids));
+}
+
+function restore(table, rows) {
+  clearTimeout(toastTimer); state.toast = null;
+  rows.forEach(r => { r.deleted_at = null; });
+  derive(); render();
+  act(sb.from(table).update({ deleted_at: null }).in('id', rows.map(r => r.id)));
+}
+
+function deleteForever(table, rows) {
+  const ids = new Set(rows.map(r => r.id));
+  if (table === 'lists') {
+    state.allLists = state.allLists.filter(l => !ids.has(l.id));
+    state.allItems = state.allItems.filter(i => !ids.has(i.list_id));
+  } else state.allItems = state.allItems.filter(i => !ids.has(i.id));
+  derive(); render();
+  act(sb.from(table).delete().in('id', [...ids]));
+}
+
+let toastTimer = null;
+function showToast(text, undo) {
+  clearTimeout(toastTimer);
+  state.toast = { text, undo };
+  toastTimer = setTimeout(() => { state.toast = null; render(); }, 7000);
+}
+
+function toastBar() {
+  const t = state.toast;
+  if (!t) return null;
+  return h('div', { class: 'toast', role: 'status' },
+    h('span', { class: 'grow' }, t.text),
+    h('button', { onclick: () => { clearTimeout(toastTimer); state.toast = null; t.undo(); } }, 'Undo'));
+}
+
+function daysLeft(deletedAt) {
+  const left = Math.ceil(BIN_DAYS - (Date.now() - new Date(deletedAt)) / 864e5);
+  return left <= 1 ? 'Deleted for good tomorrow' : `${left} days left`;
+}
+
+function binScreen() {
+  const lists = state.allLists.filter(l => l.deleted_at)
+    .sort((a, b) => b.deleted_at.localeCompare(a.deleted_at));
+  const liveIds = new Set(state.lists.map(l => l.id));
+  const items = state.allItems.filter(i => i.deleted_at && liveIds.has(i.list_id))
+    .sort((a, b) => b.deleted_at.localeCompare(a.deleted_at));
+  const listName = id => state.lists.find(l => l.id === id)?.name || '';
+  const binRow = (title, sub, table, row) => h('div', { class: 'row' },
+    h('div', { class: 'grow' }, h('span', { class: 'text' }, title), h('span', { class: 'sub' }, sub)),
+    h('button', { onclick: () => restore(table, [row]) }, 'Restore'),
+    h('button', { class: 'del', 'aria-label': 'Delete forever', onclick: () => {
+      if (confirm(`Delete "${title}" for good? This can't be undone.`)) deleteForever(table, [row]);
+    } }, '×'));
+
+  return h('div', {},
+    h('div', { class: 'topbar' },
+      h('button', { onclick: () => { state.view = 'home'; render(); } }, '‹ Lists'), h('span')),
+    h('h1', {}, 'Recycle bin'),
+    h('p', { class: 'muted' }, `Deleted lists and items stay here for ${BIN_DAYS} days, then they're gone for good.`),
+    state.notice && h('div', { class: 'msg err' }, state.notice),
+    h('h2', {}, 'Lists'),
+    lists.length
+      ? h('div', { class: 'card' }, lists.map(l => {
+          const n = state.allItems.filter(i => i.list_id === l.id && !i.deleted_at).length;
+          return binRow(l.name, `${n} item${n === 1 ? '' : 's'} · ${daysLeft(l.deleted_at)}`, 'lists', l);
+        }))
+      : h('p', { class: 'muted' }, 'No deleted lists.'),
+    h('h2', {}, 'Items'),
+    items.length
+      ? h('div', { class: 'card' }, items.map(i => binRow(i.text, `From ${listName(i.list_id)} · ${daysLeft(i.deleted_at)}`, 'items', i)))
+      : h('p', { class: 'muted' }, 'No deleted items.'),
+    (lists.length || items.length) ? h('div', { class: 'footer' }, h('span'),
+      h('button', { style: 'color: var(--danger)', onclick: () => {
+        if (!confirm("Empty the recycle bin? Everything in it will be deleted for good. This can't be undone.")) return;
+        deleteForever('items', items);
+        deleteForever('lists', lists);
+      } }, 'Empty recycle bin')) : null);
 }
 
 let channel = null;
@@ -121,6 +233,12 @@ function dueChip(item) {
     info ? info.text : '+ Due date', picker);
 }
 
+function binCount() {
+  const liveIds = new Set(state.lists.map(l => l.id));
+  return state.allLists.filter(l => l.deleted_at).length
+    + state.allItems.filter(i => i.deleted_at && liveIds.has(i.list_id)).length;
+}
+
 function homeScreen() {
   const remaining = id => state.items.filter(i => i.list_id === id && !i.done).length;
   const overdue = id => state.items.filter(i => i.list_id === id && !i.done && i.due_date && i.due_date < todayStr()).length;
@@ -159,7 +277,9 @@ function homeScreen() {
     section('Shopping', 'shopping'),
     newForm,
     h('div', { class: 'footer muted' },
-      h('span', {}, state.user.email),
+      h('span', {}, state.user.email)),
+    h('div', { class: 'footer' },
+      h('button', { onclick: () => { state.view = 'bin'; render(); } }, `🗑 Recycle bin${binCount() ? ` (${binCount()})` : ''}`),
       h('button', { onclick: () => sb.auth.signOut() }, 'Sign out')));
 }
 
@@ -185,8 +305,7 @@ function itemRow(item, list) {
     h('div', { class: 'grow' }, label, list.kind === 'todo' && dueChip(item)),
     !item.done && h('span', { class: 'grip', 'aria-label': 'Drag to reorder' }, '≡'),
     h('button', { class: 'del', 'aria-label': 'Delete', onclick: () => {
-      state.items = state.items.filter(i => i.id !== item.id); render();
-      act(sb.from('items').delete().eq('id', item.id));
+      moveToBin('items', [item], `Deleted "${item.text}"`);
     } }, '×'));
 }
 
@@ -206,8 +325,7 @@ function sortable(container, open) {
           if (!id.startsWith('tmp')) updates.push(sb.from('items').update({ position: n + 1 }).eq('id', id));
         }
       });
-      state.items.sort((a, b) => (a.position ?? Infinity) - (b.position ?? Infinity) || a.created_at?.localeCompare(b.created_at));
-      render();
+      derive(); render();
       Promise.all(updates).then(results => {
         const bad = results.find(r => r.error);
         if (bad) { state.notice = bad.error.message; render(); }
@@ -229,7 +347,8 @@ function listScreen(list) {
     const t = input.value.trim(); if (!t) return;
     input.value = '';
     const position = Math.max(0, ...items.map(i => i.position || 0)) + 1;
-    state.items.push({ id: 'tmp' + Date.now(), list_id: list.id, text: t, done: false, position });
+    state.allItems.push({ id: 'tmp' + Date.now(), list_id: list.id, text: t, done: false, position, created_at: new Date().toISOString() });
+    derive();
     render(); document.querySelector('.addbar input')?.focus();
     act(sb.from('items').insert({ list_id: list.id, text: t, position }));
   } }, input, h('button', { class: 'btn', type: 'submit' }, 'Add'));
@@ -251,17 +370,15 @@ function listScreen(list) {
       h('div', { class: 'card' }, done.map(i => itemRow(i, list))),
       h('div', { class: 'footer' },
         h('button', { onclick: () => {
-          state.items = state.items.filter(i => !(i.list_id === list.id && i.done)); render();
-          act(sb.from('items').delete().eq('list_id', list.id).eq('done', true));
+          moveToBin('items', done, `Cleared ${done.length} done item${done.length === 1 ? '' : 's'}`);
         } }, 'Clear done items'),
         h('span')),
     ],
     h('div', { class: 'footer' },
       h('span'),
       h('button', { style: 'color: var(--danger)', onclick: () => {
-        if (!confirm(`Delete the list "${list.name}" and everything in it?`)) return;
         state.openListId = null;
-        act(sb.from('lists').delete().eq('id', list.id));
+        moveToBin('lists', [list], `Deleted list "${list.name}"`);
       } }, 'Delete list')));
 }
 
@@ -269,11 +386,12 @@ function render() {
   const focused = document.activeElement?.closest('.addbar') ? true : false;
   let screen;
   if (!state.user) return;
+  else if (state.view === 'bin') screen = binScreen();
   else {
     const list = state.lists.find(l => l.id === state.openListId);
     screen = list ? listScreen(list) : homeScreen();
   }
-  app.replaceChildren(screen);
+  app.replaceChildren(screen, toastBar() || '');
   if (focused) app.querySelector('.addbar input')?.focus();
   state.notice = null;
 }
@@ -298,7 +416,8 @@ async function handleSession(session) {
   if (user) { await loadAll(); startLive(); }
   else {
     if (channel) sb.removeChannel(channel);
-    channel = null; state.lists = []; state.items = []; state.openListId = null;
+    channel = null; state.allLists = []; state.allItems = []; state.lists = []; state.items = [];
+    state.openListId = null; state.view = 'home'; state.toast = null;
     app.replaceChildren(signInScreen(state.signInMsg, true));
     state.signInMsg = null;
   }

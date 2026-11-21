@@ -53,3 +53,9 @@ input:focus, select:focus { outline: 2px solid var(--accent); border-color: tran
 .msg.err { color: var(--danger); }
 .footer { display: flex; justify-content: space-between; margin-top: 32px; font-size: 15px; }
 .edit { width: 100%; padding: 4px 8px; }
+.sub { display: block; font-size: 13px; color: var(--muted); }
+.toast { position: fixed; left: 16px; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); max-width: 528px; margin: 0 auto;
+  display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-radius: 14px;
+  background: #1d2321; color: #fff; box-shadow: 0 8px 24px rgba(0,0,0,.25); z-index: 10; font-size: 15px; }
+.toast button { color: #8fd6bf; font-weight: 700; }
+main { padding-bottom: calc(90px + env(safe-area-inset-bottom)); }
