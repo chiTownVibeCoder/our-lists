@@ -29,14 +29,17 @@ async function loadAll() {
   ]);
   if (l.error || i.error) { state.notice = (l.error || i.error).message; }
   state.lists = l.data || [];
-  state.items = i.data || [];
+  // Drag order first (position), then oldest first.
+  state.items = (i.data || []).sort((a, b) =>
+    (a.position ?? Infinity) - (b.position ?? Infinity) || a.created_at.localeCompare(b.created_at));
   if (state.openListId && !state.lists.some(x => x.id === state.openListId)) state.openListId = null;
   render();
 }
 
 let channel = null;
 let reloadTimer = null;
-function scheduleReload() { clearTimeout(reloadTimer); reloadTimer = setTimeout(loadAll, 150); }
+function scheduleReload() {
+  if (state.dragging) { state.reloadAfterDrag = true; return; } clearTimeout(reloadTimer); reloadTimer = setTimeout(loadAll, 150); }
 
 function startLive() {
   if (channel) sb.removeChannel(channel);
@@ -86,8 +89,41 @@ function signInScreen(message, isError) {
   );
 }
 
+// ---------- due dates ----------
+function todayStr(offset = 0) {
+  const d = new Date(); d.setDate(d.getDate() + offset);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function dueInfo(due) {
+  if (!due) return null;
+  const today = todayStr();
+  if (due < today) return { cls: 'overdue', text: 'Overdue · ' + niceDate(due) };
+  if (due === today) return { cls: 'today', text: 'Due today' };
+  if (due === todayStr(1)) return { cls: '', text: 'Due tomorrow' };
+  return { cls: '', text: 'Due ' + niceDate(due) };
+}
+function niceDate(due) {
+  const [y, m, d] = due.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  const sameYear = y === new Date().getFullYear();
+  return date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) });
+}
+
+function dueChip(item) {
+  const info = dueInfo(item.due_date);
+  const picker = h('input', { type: 'date', value: item.due_date || '', 'aria-label': 'Due date' });
+  picker.addEventListener('change', () => {
+    const v = picker.value || null;
+    item.due_date = v; render();
+    act(sb.from('items').update({ due_date: v }).eq('id', item.id));
+  });
+  return h('label', { class: 'due ' + (info && !item.done ? info.cls : '') },
+    info ? info.text : '+ Due date', picker);
+}
+
 function homeScreen() {
   const remaining = id => state.items.filter(i => i.list_id === id && !i.done).length;
+  const overdue = id => state.items.filter(i => i.list_id === id && !i.done && i.due_date && i.due_date < todayStr()).length;
   const section = (title, kind) => {
     const lists = state.lists.filter(l => l.kind === kind);
     return [
@@ -97,6 +133,7 @@ function homeScreen() {
             h('button', { class: 'row listlink', onclick: () => { state.openListId = l.id; render(); } },
               h('span', {}, kind === 'shopping' ? '🛒' : '✅'),
               h('span', { class: 'grow' }, l.name),
+              overdue(l.id) > 0 && h('span', { class: 'badge' }, `${overdue(l.id)} overdue`),
               h('span', { class: 'count' }, String(remaining(l.id))),
               h('span', { class: 'chev' }, '›'))))
         : h('p', { class: 'muted' }, 'No lists yet.'),
@@ -126,8 +163,8 @@ function homeScreen() {
       h('button', { onclick: () => sb.auth.signOut() }, 'Sign out')));
 }
 
-function itemRow(item) {
-  const label = h('span', { class: 'grow' }, item.text);
+function itemRow(item, list) {
+  const label = h('span', { class: 'text' }, item.text);
   // Tap the text to edit it.
   label.addEventListener('click', () => {
     const input = h('input', { class: 'edit', value: item.text });
@@ -140,16 +177,45 @@ function itemRow(item) {
     input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); });
     label.replaceWith(input); input.focus();
   });
-  return h('div', { class: 'row' + (item.done ? ' done' : '') },
+  return h('div', { class: 'row' + (item.done ? ' done' : ''), 'data-id': item.id },
     h('button', { class: 'check', 'aria-label': item.done ? 'Mark not done' : 'Mark done', onclick: () => {
       item.done = !item.done; render();
       act(sb.from('items').update({ done: item.done }).eq('id', item.id));
     } }, item.done ? '✓' : ''),
-    label,
+    h('div', { class: 'grow' }, label, list.kind === 'todo' && dueChip(item)),
+    !item.done && h('span', { class: 'grip', 'aria-label': 'Drag to reorder' }, '≡'),
     h('button', { class: 'del', 'aria-label': 'Delete', onclick: () => {
       state.items = state.items.filter(i => i.id !== item.id); render();
       act(sb.from('items').delete().eq('id', item.id));
     } }, '×'));
+}
+
+// Drag the ≡ handle to reorder. Saves the new order for both phones.
+function sortable(container, open) {
+  window.Sortable.create(container, {
+    handle: '.grip', animation: 150, forceFallback: true, fallbackTolerance: 3,
+    onStart: () => { state.dragging = true; },
+    onEnd: () => {
+      state.dragging = false;
+      const ids = [...container.querySelectorAll('.row')].map(r => r.dataset.id);
+      const updates = [];
+      ids.forEach((id, n) => {
+        const item = open.find(i => i.id === id);
+        if (item && item.position !== n + 1) {
+          item.position = n + 1;
+          if (!id.startsWith('tmp')) updates.push(sb.from('items').update({ position: n + 1 }).eq('id', id));
+        }
+      });
+      state.items.sort((a, b) => (a.position ?? Infinity) - (b.position ?? Infinity) || a.created_at?.localeCompare(b.created_at));
+      render();
+      Promise.all(updates).then(results => {
+        const bad = results.find(r => r.error);
+        if (bad) { state.notice = bad.error.message; render(); }
+        if (state.reloadAfterDrag || bad) { state.reloadAfterDrag = false; scheduleReload(); }
+      });
+    },
+  });
+  return container;
 }
 
 function listScreen(list) {
@@ -162,9 +228,10 @@ function listScreen(list) {
     e.preventDefault();
     const t = input.value.trim(); if (!t) return;
     input.value = '';
-    state.items.push({ id: 'tmp' + Date.now(), list_id: list.id, text: t, done: false });
+    const position = Math.max(0, ...items.map(i => i.position || 0)) + 1;
+    state.items.push({ id: 'tmp' + Date.now(), list_id: list.id, text: t, done: false, position });
     render(); document.querySelector('.addbar input')?.focus();
-    act(sb.from('items').insert({ list_id: list.id, text: t }));
+    act(sb.from('items').insert({ list_id: list.id, text: t, position }));
   } }, input, h('button', { class: 'btn', type: 'submit' }, 'Add'));
 
   return h('div', {},
@@ -177,11 +244,11 @@ function listScreen(list) {
     h('h1', {}, list.name),
     state.notice && h('div', { class: 'msg err' }, state.notice),
     addForm,
-    open.length ? h('div', { class: 'card' }, open.map(itemRow))
+    open.length ? sortable(h('div', { class: 'card' }, open.map(i => itemRow(i, list))), open)
       : h('p', { class: 'muted center' }, done.length ? 'All done 🎉' : 'Nothing here yet.'),
     done.length > 0 && [
       h('h2', {}, `Done (${done.length})`),
-      h('div', { class: 'card' }, done.map(itemRow)),
+      h('div', { class: 'card' }, done.map(i => itemRow(i, list))),
       h('div', { class: 'footer' },
         h('button', { onclick: () => {
           state.items = state.items.filter(i => !(i.list_id === list.id && i.done)); render();
